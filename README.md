@@ -1,14 +1,12 @@
-#🛡️ Server Security Shield
+<h1 align="center">🛡️ Server Security Shield</h1>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Version-2.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/OS-Ubuntu%20|%20Debian-orange" alt="OS">
 </p>
 
-<p align="center">
-  <b>Комплексная защита серверов за 30 секунд</b><br>
-  <i>Превращает "голый" VPS в защищённый бункер</i>
-</p>
+<h3 align="center">Комплексная защита серверов за 30 секунд</h3>
+<p align="center"><i>Превращает "голый" VPS в защищённый бункер</i></p>
 
 ---
 
@@ -180,5 +178,6 @@ shield keys      # Управление SSH-ключами
 ---
 
 <p align="center">
-  <b>🛡️ Защитите свой сервер сегодня!</b>
+  <b>🛡️ Защитите свой сервер сегодня!</b><br><br>
+  <a href="https://github.com/wrx861/server-shield">GitHub</a>
 </p>
