@@ -8,19 +8,59 @@ source "$(dirname "$0")/utils.sh" 2>/dev/null || source "/opt/server-shield/modu
 # Файл конфига SSH
 SSH_CONFIG="/etc/ssh/sshd_config"
 
-# Универсальная функция перезапуска SSH
+# Универсальная функция перезапуска SSH (надёжная)
 restart_ssh_service() {
-    # На разных системах сервис называется по-разному: sshd или ssh
-    if systemctl is-active --quiet sshd 2>/dev/null; then
-        systemctl restart sshd
-    elif systemctl is-active --quiet ssh 2>/dev/null; then
-        systemctl restart ssh
-    elif command -v service &>/dev/null; then
-        service sshd restart 2>/dev/null || service ssh restart
-    else
-        # Крайний случай
-        pkill -HUP sshd 2>/dev/null
+    local target_port="${1:-}"
+    
+    # 1. Проверяем конфиг на ошибки
+    if ! sshd -t 2>/dev/null; then
+        log_error "Ошибка в конфиге SSH!"
+        sshd -t  # Покажем ошибку
+        return 1
     fi
+    
+    # 2. Определяем имя сервиса
+    local service_name=""
+    if systemctl list-units --type=service | grep -q "ssh.service"; then
+        service_name="ssh"
+    elif systemctl list-units --type=service | grep -q "sshd.service"; then
+        service_name="sshd"
+    fi
+    
+    # 3. Перезапускаем через systemctl
+    if [[ -n "$service_name" ]]; then
+        systemctl restart "$service_name" 2>/dev/null
+        sleep 1
+        
+        # Проверяем запустился ли
+        if systemctl is-active --quiet "$service_name"; then
+            return 0
+        fi
+        
+        # Если не запустился - пробуем stop/start
+        systemctl stop "$service_name" 2>/dev/null
+        sleep 1
+        systemctl start "$service_name" 2>/dev/null
+        sleep 1
+        
+        if systemctl is-active --quiet "$service_name"; then
+            return 0
+        fi
+    fi
+    
+    # 4. Пробуем через service
+    service ssh restart 2>/dev/null || service sshd restart 2>/dev/null
+    sleep 1
+    
+    # 5. Крайний случай - убиваем и запускаем напрямую
+    if [[ -n "$target_port" ]] && ! ss -tlnp | grep -q ":$target_port"; then
+        pkill -9 sshd 2>/dev/null
+        sleep 1
+        /usr/sbin/sshd 2>/dev/null
+        sleep 1
+    fi
+    
+    return 0
 }
 
 # Функция бэкапа SSH конфига
@@ -93,14 +133,40 @@ BANNER
     
     # Перезапуск SSH
     log_step "Перезапуск SSH..."
-    restart_ssh_service
+    restart_ssh_service "$new_port"
     
-    # Проверяем что SSH запустился
-    sleep 1
-    if ss -tlnp | grep -q ":$new_port"; then
-        log_info "SSH работает на порту $new_port"
-    else
-        log_warn "SSH может не работать на порту $new_port - проверьте!"
+    # Проверяем что SSH запустился на новом порту (до 5 попыток)
+    local attempts=0
+    local max_attempts=5
+    
+    while [[ $attempts -lt $max_attempts ]]; do
+        sleep 1
+        if ss -tlnp | grep -q ":$new_port"; then
+            log_info "✓ SSH работает на порту $new_port"
+            break
+        fi
+        attempts=$((attempts + 1))
+        
+        if [[ $attempts -lt $max_attempts ]]; then
+            log_warn "SSH не на порту $new_port, попытка $attempts/$max_attempts..."
+            restart_ssh_service "$new_port"
+        fi
+    done
+    
+    # Финальная проверка
+    if ! ss -tlnp | grep -q ":$new_port"; then
+        log_error "SSH не запустился на порту $new_port после $max_attempts попыток"
+        # Аварийный запуск напрямую
+        pkill -9 sshd 2>/dev/null
+        sleep 1
+        /usr/sbin/sshd
+        sleep 2
+        
+        if ss -tlnp | grep -q ":$new_port"; then
+            log_info "✓ SSH запущен напрямую на порту $new_port"
+        else
+            log_error "Не удалось запустить SSH на порту $new_port"
+        fi
     fi
     
     # Сохраняем порт в конфиг
@@ -149,46 +215,43 @@ change_ssh_port() {
         echo "Port $new_port" >> "$SSH_CONFIG"
     fi
     
-    # 3. Перезапускаем SSH
+    # 3. Перезапускаем SSH с проверкой
     log_step "Перезапуск SSH..."
-    restart_ssh_service
+    restart_ssh_service "$new_port"
     
-    # 4. Проверяем что SSH работает на новом порту
-    sleep 2
-    if ss -tlnp | grep -q ":$new_port"; then
-        log_info "SSH успешно запущен на порту $new_port"
-        
-        # 5. Только теперь удаляем старый порт из UFW
-        if command -v ufw &> /dev/null && [[ "$old_port" != "$new_port" ]]; then
-            log_step "Закрываем старый порт $old_port..."
-            # Удаляем все варианты правил для старого порта
-            ufw delete allow ${old_port}/tcp 2>/dev/null
-            ufw delete allow ${old_port} 2>/dev/null
-            # Удаляем правила с IP ограничением
-            ufw status numbered | grep " $old_port " | grep -oP '^\[\s*\K\d+' | sort -rn | while read num; do
-                echo "y" | ufw delete $num 2>/dev/null
-            done
+    # 4. Проверяем что SSH работает на новом порту (до 5 попыток)
+    local attempts=0
+    local max_attempts=5
+    local ssh_started=false
+    
+    while [[ $attempts -lt $max_attempts ]]; do
+        sleep 1
+        if ss -tlnp | grep -q ":$new_port"; then
+            ssh_started=true
+            break
         fi
-        
-        # Сохраняем в конфиг
-        save_config "SSH_PORT" "$new_port"
-        
-        echo ""
-        echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
-        echo -e "${GREEN}║  ✅ SSH порт успешно изменён на: $new_port              ${NC}"
-        echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
-        echo ""
-        echo -e "${YELLOW}⚠️  Не закрывайте текущую сессию!${NC}"
-        echo -e "   Откройте новое окно и проверьте подключение:"
-        echo -e "   ${CYAN}ssh -p $new_port root@$(curl -s ifconfig.me 2>/dev/null || echo 'ваш_ip')${NC}"
-        echo ""
-    else
+        attempts=$((attempts + 1))
+        log_warn "SSH не на порту $new_port, попытка $attempts/$max_attempts..."
+        restart_ssh_service "$new_port"
+    done
+    
+    # Аварийный запуск если не удалось
+    if [[ "$ssh_started" == false ]]; then
+        log_warn "Аварийный запуск SSH..."
+        pkill -9 sshd 2>/dev/null
+        sleep 1
+        /usr/sbin/sshd
+        sleep 2
+        ss -tlnp | grep -q ":$new_port" && ssh_started=true
+    fi
+    
+    if [[ "$ssh_started" == false ]]; then
         log_error "SSH не запустился на порту $new_port!"
         log_warn "Откат изменений..."
         
         # Откат
         sed -i "s/^Port.*/Port $old_port/" "$SSH_CONFIG"
-        systemctl restart sshd 2>/dev/null || service ssh restart
+        restart_ssh_service "$old_port"
         
         # Удаляем новый порт из UFW
         ufw delete allow ${new_port}/tcp 2>/dev/null
@@ -196,6 +259,30 @@ change_ssh_port() {
         log_error "Смена порта не удалась. Порт остался: $old_port"
         return 1
     fi
+    
+    # 5. Успех! Удаляем старый порт из UFW
+    if command -v ufw &> /dev/null && [[ "$old_port" != "$new_port" ]]; then
+        log_step "Закрываем старый порт $old_port..."
+        ufw delete allow ${old_port}/tcp 2>/dev/null
+        ufw delete allow ${old_port} 2>/dev/null
+        # Удаляем правила с IP ограничением
+        ufw status numbered | grep " $old_port " | grep -oP '^\[\s*\K\d+' | sort -rn | while read num; do
+            echo "y" | ufw delete $num 2>/dev/null
+        done
+    fi
+    
+    # Сохраняем в конфиг
+    save_config "SSH_PORT" "$new_port"
+    
+    echo ""
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║  ✅ SSH порт успешно изменён на: $new_port              ${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${YELLOW}⚠️  Не закрывайте текущую сессию!${NC}"
+    echo -e "   Откройте новое окно и проверьте подключение:"
+    echo -e "   ${CYAN}ssh -p $new_port root@$(curl -s ifconfig.me 2>/dev/null || echo 'ваш_ip')${NC}"
+    echo ""
 }
 
 # Функция получения текущего порта
