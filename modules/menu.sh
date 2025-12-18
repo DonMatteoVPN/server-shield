@@ -53,8 +53,53 @@ _show_version_info() {
     fi
 }
 
+# Проверка обновлений при запуске (один раз)
+_update_checked=false
+
+check_update_on_start() {
+    # Проверяем только один раз за сессию
+    if [[ "$_update_checked" == true ]]; then
+        return
+    fi
+    _update_checked=true
+    
+    # Проверяем наличие функций из updater.sh
+    if ! type get_remote_version &>/dev/null; then
+        return
+    fi
+    
+    local local_ver=$(get_local_version)
+    local remote_ver=$(get_remote_version)
+    
+    # Если нет данных о remote версии - пропускаем
+    [[ -z "$remote_ver" ]] && return
+    
+    # Сравниваем версии
+    if version_gt "$remote_ver" "$local_ver"; then
+        echo ""
+        echo -e "${YELLOW}╔══════════════════════════════════════════════════════╗${NC}"
+        echo -e "${YELLOW}║  ⬆️  ДОСТУПНО ОБНОВЛЕНИЕ: $local_ver → $remote_ver${NC}"
+        echo -e "${YELLOW}╚══════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "  Обновить сейчас? Это займёт несколько секунд."
+        echo ""
+        
+        read -p "  Обновить? (y/N): " choice
+        if [[ "$choice" =~ ^[Yy]$ ]]; then
+            do_update
+            echo ""
+            echo -e "${GREEN}Обновление завершено! Перезапустите shield для применения.${NC}"
+            echo ""
+            read -p "Нажмите Enter для продолжения..." 
+        fi
+    fi
+}
+
 # Главное меню с версией
 main_menu() {
+    # Проверяем обновления при первом запуске
+    check_update_on_start
+    
     while true; do
         print_header
         
