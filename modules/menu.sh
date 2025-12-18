@@ -232,7 +232,7 @@ ssh_menu() {
                 fi
                 ;;
             2)
-                systemctl restart sshd 2>/dev/null || service ssh restart
+                restart_ssh_service
                 log_info "SSH перезапущен"
                 ;;
             3)
