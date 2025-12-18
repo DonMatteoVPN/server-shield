@@ -8,6 +8,21 @@ source "$(dirname "$0")/utils.sh" 2>/dev/null || source "/opt/server-shield/modu
 # Файл конфига SSH
 SSH_CONFIG="/etc/ssh/sshd_config"
 
+# Универсальная функция перезапуска SSH
+restart_ssh_service() {
+    # На разных системах сервис называется по-разному: sshd или ssh
+    if systemctl is-active --quiet sshd 2>/dev/null; then
+        systemctl restart sshd
+    elif systemctl is-active --quiet ssh 2>/dev/null; then
+        systemctl restart ssh
+    elif command -v service &>/dev/null; then
+        service sshd restart 2>/dev/null || service ssh restart
+    else
+        # Крайний случай
+        pkill -HUP sshd 2>/dev/null
+    fi
+}
+
 # Функция бэкапа SSH конфига
 backup_ssh_config() {
     local backup_file="$BACKUP_DIR/sshd_config.$(date +%Y%m%d_%H%M%S)"
@@ -77,7 +92,16 @@ BANNER
     fi
     
     # Перезапуск SSH
-    systemctl restart sshd 2>/dev/null || service ssh restart
+    log_step "Перезапуск SSH..."
+    restart_ssh_service
+    
+    # Проверяем что SSH запустился
+    sleep 1
+    if ss -tlnp | grep -q ":$new_port"; then
+        log_info "SSH работает на порту $new_port"
+    else
+        log_warn "SSH может не работать на порту $new_port - проверьте!"
+    fi
     
     # Сохраняем порт в конфиг
     save_config "SSH_PORT" "$new_port"
@@ -127,7 +151,7 @@ change_ssh_port() {
     
     # 3. Перезапускаем SSH
     log_step "Перезапуск SSH..."
-    systemctl restart sshd 2>/dev/null || service ssh restart
+    restart_ssh_service
     
     # 4. Проверяем что SSH работает на новом порту
     sleep 2
