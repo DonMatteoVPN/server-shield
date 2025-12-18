@@ -201,8 +201,20 @@ change_ssh_port() {
     
     # Также проверяем есть ли правило с IP ограничением для старого порта
     if [[ -z "$admin_ip" ]]; then
-        # Пробуем найти IP из текущих правил UFW
+        # Пробуем найти IP из текущих правил UFW для старого порта
         admin_ip=$(ufw status | grep -E "^${old_port}[^0-9]|^${old_port}/" | grep -v "Anywhere" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    fi
+    
+    # Также проверяем правила с комментарием SSH или Admin
+    if [[ -z "$admin_ip" ]]; then
+        admin_ip=$(ufw status | grep -iE "ssh|admin" | grep -v "Anywhere" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    fi
+    
+    # Показываем что нашли
+    if [[ -n "$admin_ip" ]]; then
+        log_info "Найден IP админа: $admin_ip"
+    else
+        log_warn "IP админа не найден — порт будет открыт для всех"
     fi
     
     # 1. СНАЧАЛА открываем НОВЫЙ порт в UFW (до изменения SSH!)
