@@ -157,8 +157,19 @@ check_existing_firewall() {
         
         local port=$(echo "$line" | awk '{print $1}')
         
+        # Пропускаем whitelist IP (первое поле = Anywhere)
+        # Формат: "Anywhere                   ALLOW       64.188.71.12"
+        if [[ "$port" == "Anywhere" ]]; then
+            continue
+        fi
+        
         # Нормализуем порт для проверки дубликатов (убираем /tcp, /udp)
         local port_num=$(echo "$port" | cut -d'/' -f1)
+        
+        # Проверяем что это число (порт), а не что-то другое
+        if ! [[ "$port_num" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
         
         # Определяем источник
         local from="Anywhere"
@@ -535,41 +546,47 @@ apply_protection() {
                 log_info "Порт 22 закрыт"
             fi
             
-            # 2. Ограничиваем SSH по IP если открыт для всех
+            # 2. Настраиваем SSH доступ
+            # Если SSH открыт для всех — ограничиваем по IP
+            # Если SSH не открыт — открываем (иначе потеряем доступ!)
             if [[ "${SSH_OPEN_ALL}" == "true" ]]; then
-                log_step "Ограничение SSH доступа..."
+                log_step "Ограничение SSH доступа по IP..."
                 
                 # Удаляем текущие правила SSH (открытые для всех)
                 ufw delete allow ${SSH_PORT}/tcp 2>/dev/null
                 ufw delete allow ${SSH_PORT} 2>/dev/null
-                
-                # Для ноды: SSH доступ для админа И панели
-                if [[ "$SERVER_TYPE" == "2" ]]; then
-                    if [[ -n "$ADMIN_IP" ]]; then
-                        ufw allow from "$ADMIN_IP" to any port "$SSH_PORT" proto tcp comment 'Admin SSH'
-                        log_info "SSH доступ для админа: $ADMIN_IP"
+            fi
+            
+            # Теперь добавляем SSH правило (с ограничением или без)
+            # Для ноды: SSH доступ для админа И/ИЛИ панели
+            if [[ "$SERVER_TYPE" == "2" ]]; then
+                local ssh_added=false
+                if [[ -n "$ADMIN_IP" ]]; then
+                    ufw allow from "$ADMIN_IP" to any port "$SSH_PORT" proto tcp comment 'Admin SSH'
+                    log_info "SSH доступ для админа: $ADMIN_IP"
+                    ssh_added=true
+                fi
+                if [[ -n "$PANEL_IP" ]]; then
+                    # Панель получает полный доступ (включая SSH)
+                    if ! ufw status | grep -q "$PANEL_IP"; then
+                        ufw allow from "$PANEL_IP" comment 'Panel Full Access'
+                        log_info "Полный доступ для панели: $PANEL_IP"
                     fi
-                    if [[ -n "$PANEL_IP" ]]; then
-                        # Панель получает полный доступ (включая SSH)
-                        if ! ufw status | grep -q "$PANEL_IP"; then
-                            ufw allow from "$PANEL_IP" comment 'Panel Full Access'
-                            log_info "Полный доступ для панели: $PANEL_IP"
-                        fi
-                    fi
-                    # Если ни админ, ни панель не указаны — предупреждаем но открываем
-                    if [[ -z "$ADMIN_IP" ]] && [[ -z "$PANEL_IP" ]]; then
-                        ufw allow "$SSH_PORT"/tcp comment 'SSH'
-                        log_warn "SSH оставлен открытым (не указан IP админа/панели)"
-                    fi
+                    ssh_added=true
+                fi
+                # Если ни админ, ни панель не указаны — открываем SSH для всех
+                if [[ "$ssh_added" == false ]]; then
+                    ufw allow "$SSH_PORT"/tcp comment 'SSH'
+                    log_warn "SSH открыт для всех (не указан IP админа/панели)"
+                fi
+            else
+                # Для панели: SSH только для админа (или для всех если админ не указан)
+                if [[ -n "$ADMIN_IP" ]]; then
+                    ufw allow from "$ADMIN_IP" to any port "$SSH_PORT" proto tcp comment 'Admin SSH'
+                    log_info "SSH доступ для админа: $ADMIN_IP"
                 else
-                    # Для панели: SSH только для админа
-                    if [[ -n "$ADMIN_IP" ]]; then
-                        ufw allow from "$ADMIN_IP" to any port "$SSH_PORT" proto tcp comment 'Admin SSH'
-                        log_info "SSH доступ для админа: $ADMIN_IP"
-                    else
-                        ufw allow "$SSH_PORT"/tcp comment 'SSH'
-                        log_warn "SSH оставлен открытым (не указан IP админа)"
-                    fi
+                    ufw allow "$SSH_PORT"/tcp comment 'SSH'
+                    log_warn "SSH открыт для всех (не указан IP админа)"
                 fi
             fi
             
@@ -614,8 +631,31 @@ apply_protection() {
         fi
     fi
     
+    # КРИТИЧНО: ВСЕГДА проверяем что SSH порт открыт!
+    # Это главная защита от потери доступа
+    if command -v ufw &> /dev/null && ufw status | grep -q "active"; then
+        # Проверяем открыт ли SSH порт (любым способом - напрямую или через whitelist)
+        if ! ufw status | grep -qE "^${SSH_PORT}[^0-9]|^${SSH_PORT}/"; then
+            log_warn "SSH порт $SSH_PORT не открыт! Открываем..."
+            ufw allow "${SSH_PORT}/tcp" comment 'SSH'
+        fi
+        # Двойная проверка - если порт нестандартный, убеждаемся что он точно открыт
+        if [[ "$SSH_PORT" != "22" ]]; then
+            ufw allow "${SSH_PORT}/tcp" comment 'SSH' 2>/dev/null
+            log_info "SSH порт $SSH_PORT гарантированно открыт"
+        fi
+    fi
+    
     # Перезагружаем UFW после всех изменений
     ufw --force reload 2>/dev/null
+    
+    # Финальная проверка SSH порта после reload
+    sleep 1
+    if ufw status | grep -qE "^${SSH_PORT}[^0-9]|^${SSH_PORT}/"; then
+        log_info "✓ SSH порт $SSH_PORT открыт в UFW"
+    else
+        log_error "SSH порт $SSH_PORT может быть не открыт! Проверьте вручную: ufw status"
+    fi
     
     echo -e "   Настройка Kernel Hardening..."
     apply_kernel_hardening
