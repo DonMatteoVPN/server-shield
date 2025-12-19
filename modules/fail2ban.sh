@@ -546,26 +546,55 @@ diagnose_telegram() {
     fi
 }
 
-# Показать забаненные IP
+# Показать забаненные IP (ВСЕ jail'ы)
 show_banned_ips() {
     echo ""
     echo -e "${WHITE}Забаненные IP:${NC}"
     echo ""
     
-    if command -v fail2ban-client &> /dev/null; then
-        local banned_list=$(fail2ban-client status sshd 2>/dev/null | grep "Banned IP list" | cut -d: -f2)
+    if ! command -v fail2ban-client &> /dev/null; then
+        echo -e "  ${RED}fail2ban-client не найден${NC}"
+        return
+    fi
+    
+    local found_any=false
+    
+    # Получаем список всех активных jail'ов
+    local jails=$(fail2ban-client status 2>/dev/null | grep "Jail list" | cut -d: -f2 | tr ',' ' ' | tr -d '\t')
+    
+    for jail in $jails; do
+        jail=$(echo "$jail" | xargs)  # trim
+        [[ -z "$jail" ]] && continue
         
-        if [[ -n "$banned_list" ]]; then
+        local banned_list=$(fail2ban-client status "$jail" 2>/dev/null | grep "Banned IP list" | cut -d: -f2 | xargs)
+        
+        if [[ -n "$banned_list" ]] && [[ "$banned_list" != " " ]]; then
+            found_any=true
+            
+            # Определяем название jail
+            case "$jail" in
+                "sshd") jail_name="🔐 SSH" ;;
+                "portscan") jail_name="🔍 Portscan" ;;
+                "nginx-http-auth-shield") jail_name="🌐 Nginx Auth" ;;
+                "nginx-badbots-shield") jail_name="🤖 Nginx Bots" ;;
+                "mysqld-auth-shield") jail_name="🗄️ MySQL" ;;
+                *) jail_name="$jail" ;;
+            esac
+            
+            echo -e "  ${YELLOW}$jail_name ($jail):${NC}"
             echo "$banned_list" | tr ' ' '\n' | while read ip; do
-                [[ -n "$ip" ]] && echo -e "  ${RED}•${NC} $ip"
+                [[ -n "$ip" ]] && echo -e "    ${RED}•${NC} $ip"
             done
-        else
-            echo -e "  ${GREEN}Нет забаненных IP${NC}"
+            echo ""
         fi
+    done
+    
+    if [[ "$found_any" == false ]]; then
+        echo -e "  ${GREEN}Нет забаненных IP ни в одном jail${NC}"
     fi
 }
 
-# Разбанить IP
+# Разбанить IP (во ВСЕХ jail'ах)
 unban_ip() {
     local ip="$1"
     
@@ -574,15 +603,39 @@ unban_ip() {
         return 1
     fi
     
-    if command -v fail2ban-client &> /dev/null; then
-        fail2ban-client set sshd unbanip "$ip" 2>/dev/null
-        log_info "IP $ip разбанен"
+    if ! command -v fail2ban-client &> /dev/null; then
+        log_error "fail2ban-client не найден"
+        return 1
+    fi
+    
+    local unbanned=false
+    
+    # Получаем список всех активных jail'ов
+    local jails=$(fail2ban-client status 2>/dev/null | grep "Jail list" | cut -d: -f2 | tr ',' ' ' | tr -d '\t')
+    
+    for jail in $jails; do
+        jail=$(echo "$jail" | xargs)  # trim
+        [[ -z "$jail" ]] && continue
+        
+        # Проверяем есть ли IP в этом jail
+        if fail2ban-client status "$jail" 2>/dev/null | grep -q "$ip"; then
+            fail2ban-client set "$jail" unbanip "$ip" 2>/dev/null
+            if [[ $? -eq 0 ]]; then
+                log_info "IP $ip разбанен в jail '$jail'"
+                unbanned=true
+            fi
+        fi
+    done
+    
+    if [[ "$unbanned" == false ]]; then
+        log_warn "IP $ip не найден ни в одном jail"
     fi
 }
 
-# Бан IP вручную
+# Бан IP вручную (в указанный jail или sshd по умолчанию)
 ban_ip() {
     local ip="$1"
+    local jail="${2:-sshd}"
     
     if [[ -z "$ip" ]]; then
         log_error "IP не указан"
@@ -595,8 +648,12 @@ ban_ip() {
     fi
     
     if command -v fail2ban-client &> /dev/null; then
-        fail2ban-client set sshd banip "$ip" 2>/dev/null
-        log_info "IP $ip забанен"
+        fail2ban-client set "$jail" banip "$ip" 2>/dev/null
+        if [[ $? -eq 0 ]]; then
+            log_info "IP $ip забанен в jail '$jail'"
+        else
+            log_error "Не удалось забанить IP $ip в jail '$jail'"
+        fi
     fi
 }
 
