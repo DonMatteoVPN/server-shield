@@ -579,12 +579,19 @@ download_shield_files() {
     echo -e "   Скачивание: uninstall.sh"
     curl -fsSL "$GITHUB_RAW/uninstall.sh" -o "$SHIELD_DIR/uninstall.sh" 2>/dev/null || true
     
+    echo -e "   Скачивание: VERSION"
+    curl -fsSL "$GITHUB_RAW/VERSION" -o "$SHIELD_DIR/VERSION" 2>/dev/null || echo "2.2.35" > "$SHIELD_DIR/VERSION"
+    
+    echo -e "   Скачивание: README.md"
+    curl -fsSL "$GITHUB_RAW/README.md" -o "$SHIELD_DIR/README.md" 2>/dev/null || true
+    
     chmod +x "$SHIELD_DIR"/*.sh 2>/dev/null || true
     chmod +x "$SHIELD_DIR/modules/"*.sh 2>/dev/null || true
     
     ln -sf "$SHIELD_DIR/shield.sh" /usr/local/bin/shield
     
-    log_info "Server Shield установлен в $SHIELD_DIR"
+    local installed_version=$(cat "$SHIELD_DIR/VERSION" 2>/dev/null || echo "unknown")
+    log_info "Server Shield v${installed_version} установлен в $SHIELD_DIR"
 }
 
 apply_protection() {
