@@ -1,6 +1,7 @@
 #!/bin/bash
 #
-# Server Shield v2.0 - Главный установщик
+# Server Shield - Главный установщик
+# Версия берётся из файла VERSION
 #
 
 # Цвета
@@ -16,11 +17,23 @@ NC=$'\e[0m'
 SHIELD_DIR="/opt/server-shield"
 GITHUB_RAW="https://raw.githubusercontent.com/wrx861/server-shield/main"
 
+# Получаем версию из GitHub (или локально если уже установлен)
+get_version() {
+    if [[ -f "$SHIELD_DIR/VERSION" ]]; then
+        cat "$SHIELD_DIR/VERSION"
+    else
+        # При первой установке качаем VERSION из GitHub
+        curl -s "$GITHUB_RAW/VERSION" 2>/dev/null || echo "2.2"
+    fi
+}
+
+SHIELD_VERSION=$(get_version)
+
 # Функции вывода
 print_header() {
     clear
     echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║       🛡️  SERVER SECURITY SHIELD v2.0  🛡️           ║${NC}"
+    echo -e "${GREEN}║       🛡️  SERVER SECURITY SHIELD v${SHIELD_VERSION}  🛡️           ║${NC}"
     echo -e "${GREEN}║         Защита сервера за 30 секунд                  ║${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
     echo ""
