@@ -162,7 +162,23 @@ get_update_version() {
     fi
 }
 
-# Выполнить обновление
+# Получить MD5 хэш файла
+get_file_hash() {
+    local file="$1"
+    if [[ -f "$file" ]]; then
+        md5sum "$file" 2>/dev/null | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+# Получить MD5 хэш из URL (без скачивания всего файла)
+get_remote_hash() {
+    local url="$1"
+    curl -fsSL --connect-timeout 5 --max-time 10 "$url" 2>/dev/null | md5sum | awk '{print $1}'
+}
+
+# Выполнить обновление (умное — только изменённые файлы)
 do_update() {
     print_section "⬆️ Обновление Server Shield"
     
@@ -194,9 +210,9 @@ do_update() {
     source "$SHIELD_DIR/modules/backup.sh" 2>/dev/null
     create_full_backup
     
-    log_step "Скачивание обновлений..."
+    log_step "Проверка изменений..."
     
-    # Список файлов для обновления
+    # Список всех файлов для проверки
     local modules=(
         "utils.sh"
         "ssh.sh"
@@ -209,24 +225,74 @@ do_update() {
         "backup.sh"
         "status.sh"
         "menu.sh"
+        "traffic.sh"
+        "monitor.sh"
         "updater.sh"
     )
     
-    # Скачиваем модули
+    local updated_count=0
+    local skipped_count=0
+    local new_count=0
+    
+    # Проверяем и обновляем модули
     for module in "${modules[@]}"; do
-        echo -e "   Обновление: $module"
-        if ! curl -fsSL "$GITHUB_RAW/modules/$module" -o "$SHIELD_DIR/modules/$module" 2>/dev/null; then
-            log_error "Ошибка при скачивании $module"
-            return 1
+        local local_file="$SHIELD_DIR/modules/$module"
+        local remote_url="$GITHUB_RAW/modules/$module"
+        
+        # Проверяем существует ли локальный файл
+        if [[ ! -f "$local_file" ]]; then
+            # Новый файл — скачиваем
+            echo -e "   ${GREEN}+ Новый:${NC} $module"
+            if curl -fsSL "$remote_url" -o "$local_file" 2>/dev/null; then
+                ((new_count++))
+            fi
+            continue
+        fi
+        
+        # Получаем хэши
+        local local_hash=$(get_file_hash "$local_file")
+        local remote_hash=$(get_remote_hash "$remote_url")
+        
+        if [[ -z "$remote_hash" ]]; then
+            echo -e "   ${YELLOW}? Пропуск:${NC} $module (не удалось получить)"
+            continue
+        fi
+        
+        if [[ "$local_hash" == "$remote_hash" ]]; then
+            # Файл не изменился
+            ((skipped_count++))
+        else
+            # Файл изменился — обновляем
+            echo -e "   ${CYAN}↻ Обновление:${NC} $module"
+            if curl -fsSL "$remote_url" -o "$local_file" 2>/dev/null; then
+                ((updated_count++))
+            fi
         fi
     done
     
-    # Скачиваем основные файлы
-    echo -e "   Обновление: shield.sh"
-    curl -fsSL "$GITHUB_RAW/shield.sh" -o "$SHIELD_DIR/shield.sh" 2>/dev/null
+    # Основные файлы
+    local main_files=("shield.sh" "VERSION" "README.md" "uninstall.sh")
     
-    echo -e "   Обновление: VERSION"
-    curl -fsSL "$GITHUB_RAW/VERSION" -o "$SHIELD_DIR/VERSION" 2>/dev/null
+    for file in "${main_files[@]}"; do
+        local local_file="$SHIELD_DIR/$file"
+        local remote_url="$GITHUB_RAW/$file"
+        
+        if [[ ! -f "$local_file" ]]; then
+            echo -e "   ${GREEN}+ Новый:${NC} $file"
+            curl -fsSL "$remote_url" -o "$local_file" 2>/dev/null && ((new_count++))
+            continue
+        fi
+        
+        local local_hash=$(get_file_hash "$local_file")
+        local remote_hash=$(get_remote_hash "$remote_url")
+        
+        if [[ -n "$remote_hash" ]] && [[ "$local_hash" != "$remote_hash" ]]; then
+            echo -e "   ${CYAN}↻ Обновление:${NC} $file"
+            curl -fsSL "$remote_url" -o "$local_file" 2>/dev/null && ((updated_count++))
+        else
+            ((skipped_count++))
+        fi
+    done
     
     # Делаем исполняемыми
     chmod +x "$SHIELD_DIR"/*.sh 2>/dev/null
@@ -236,8 +302,15 @@ do_update() {
     log_info "Обновление завершено!"
     echo -e "  Новая версия: ${GREEN}$remote_ver${NC}"
     echo ""
-    echo -e "  ${YELLOW}Перезапустите shield для применения изменений:${NC}"
-    echo -e "  ${CYAN}shield${NC}"
+    echo -e "  ${GREEN}Обновлено:${NC} $updated_count файлов"
+    echo -e "  ${GREEN}Новых:${NC} $new_count файлов"
+    echo -e "  ${CYAN}Без изменений:${NC} $skipped_count файлов"
+    echo ""
+    
+    if [[ $updated_count -gt 0 ]] || [[ $new_count -gt 0 ]]; then
+        echo -e "  ${YELLOW}Перезапустите shield для применения изменений:${NC}"
+        echo -e "  ${CYAN}shield${NC}"
+    fi
     
     return 0
 }
