@@ -361,6 +361,14 @@ collect_settings() {
     # 0. Проверяем текущие правила UFW
     check_existing_firewall
     
+    # 0.1 Имя сервера (для алертов)
+    echo ""
+    echo -e "${WHITE}0. Название сервера (для Telegram алертов)${NC}"
+    echo -e "   ${CYAN}Примеры: USA-Node-1, NL-Panel, DE-VPN${NC}"
+    echo -e "   Нажмите ${WHITE}Enter${NC} чтобы использовать hostname"
+    read -p "   Название сервера [$(hostname)]: " SERVER_NAME
+    SERVER_NAME=${SERVER_NAME:-}
+    
     # 1. Роль сервера
     echo ""
     echo -e "${WHITE}1. Какую роль выполняет этот сервер?${NC}"
@@ -368,6 +376,13 @@ collect_settings() {
     echo "   2) 🚀 НОДА (VPN сервер)"
     read -p "   Ваш выбор (1 или 2): " SERVER_TYPE
     SERVER_TYPE=${SERVER_TYPE:-1}
+    
+    # 1.1 Настройка SSH-ключей (ПЕРЕД сбором других настроек)
+    echo ""
+    source "$SHIELD_DIR/modules/keys.sh" 2>/dev/null || true
+    if type setup_ssh_keys_wizard &>/dev/null; then
+        setup_ssh_keys_wizard
+    fi
     
     # 2. IP админа
     echo ""
@@ -466,6 +481,35 @@ collect_settings() {
         echo ""
         read -p "   ID администратора: " TG_CHAT_ID
     fi
+    
+    # 7. Ограничение скорости (для нод)
+    SETUP_TRAFFIC_LIMIT=""
+    TRAFFIC_RATE=""
+    TRAFFIC_PORTS=""
+    if [[ "$SERVER_TYPE" == "2" ]]; then
+        echo ""
+        echo -e "${WHITE}7. Ограничение скорости клиентов${NC}"
+        echo -e "   Можно ограничить скорость для каждого VPN клиента."
+        echo -e "   Например: 10 Mbps — каждый клиент получит максимум 10 Mbps."
+        echo ""
+        read -p "   Настроить ограничение скорости? (y/N): " setup_traffic
+        
+        if [[ "$setup_traffic" =~ ^[Yy]$ ]]; then
+            SETUP_TRAFFIC_LIMIT="yes"
+            
+            echo ""
+            echo -e "   ${WHITE}Укажите лимит скорости (Mbps):${NC}"
+            echo -e "   Примеры: ${CYAN}5${NC} | ${CYAN}10${NC} | ${CYAN}20${NC} | ${CYAN}50${NC} | ${CYAN}100${NC}"
+            read -p "   Лимит (Mbps) [10]: " TRAFFIC_RATE
+            TRAFFIC_RATE=${TRAFFIC_RATE:-10}
+            
+            echo ""
+            echo -e "   ${WHITE}Укажите порты VPN через пробел:${NC}"
+            echo -e "   Примеры: ${CYAN}443${NC} | ${CYAN}443 8443${NC} | ${CYAN}443 2053 2083${NC}"
+            read -p "   Порты [443]: " TRAFFIC_PORTS
+            TRAFFIC_PORTS=${TRAFFIC_PORTS:-443}
+        fi
+    fi
 }
 
 # =====================================================
@@ -503,6 +547,9 @@ download_shield_files() {
         "backup.sh"
         "status.sh"
         "menu.sh"
+        "traffic.sh"
+        "monitor.sh"
+        "updater.sh"
     )
     
     for module in "${modules[@]}"; do
@@ -725,6 +772,11 @@ apply_protection() {
     # Сохраняем SSH порт
     save_config "SSH_PORT" "$SSH_PORT"
     
+    # Сохраняем имя сервера (для алертов)
+    if [[ -n "$SERVER_NAME" ]]; then
+        save_config "SERVER_NAME" "$SERVER_NAME"
+    fi
+    
     # Rootkit Hunter по умолчанию ВЫКЛЮЧЕН (можно включить через shield → Rootkit)
     # echo -e "   Настройка Rootkit Hunter..."
     # setup_rkhunter
@@ -736,6 +788,33 @@ apply_protection() {
     
     timedatectl set-ntp true 2>/dev/null || true
     systemctl restart chrony 2>/dev/null || true
+    
+    # Ограничение скорости (если выбрано)
+    if [[ "$SETUP_TRAFFIC_LIMIT" == "yes" ]] && [[ -n "$TRAFFIC_RATE" ]]; then
+        echo -e "   Настройка ограничения скорости..."
+        
+        # Подключаем модуль
+        source "$SHIELD_DIR/modules/traffic.sh" 2>/dev/null || true
+        
+        if type save_traffic_config &>/dev/null; then
+            local detected_iface=$(detect_interface)
+            local ceil=$((TRAFFIC_RATE + TRAFFIC_RATE / 5))
+            
+            save_traffic_config "IFACE" "$detected_iface"
+            save_traffic_config "PORTS" "$TRAFFIC_PORTS"
+            save_traffic_config "RATE" "$TRAFFIC_RATE"
+            save_traffic_config "CEIL" "$ceil"
+            save_traffic_config "ENABLED" "true"
+            
+            # Применяем
+            apply_limits
+            
+            # Включаем автозапуск
+            enable_autostart
+            
+            log_info "Ограничение скорости: ${TRAFFIC_RATE} Mbps на клиента"
+        fi
+    fi
     
     echo -e "   Создание бэкапа..."
     create_full_backup
@@ -764,6 +843,13 @@ show_result() {
     echo -e "    ⚪ Rootkit сканирование (выкл, включить: ${CYAN}shield → Rootkit${NC})"
     echo -e "    ✅ Auto Updates"
     echo -e "    ✅ Бэкап создан"
+    
+    # Ограничение скорости
+    if [[ "$SETUP_TRAFFIC_LIMIT" == "yes" ]] && [[ -n "$TRAFFIC_RATE" ]]; then
+        echo -e "    ✅ Ограничение скорости: ${CYAN}${TRAFFIC_RATE} Mbps${NC}/клиент"
+    elif [[ "$SERVER_TYPE" == "2" ]]; then
+        echo -e "    ⚪ Ограничение скорости (настроить: ${CYAN}shield → t${NC})"
+    fi
     echo ""
     
     if [[ -n "$ADMIN_IP" ]]; then
