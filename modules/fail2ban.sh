@@ -1518,3 +1518,5 @@ configure_portscan_ignore_ports() {
     log_info "Порты обновлены: $new_ports"
     echo ""
     echo -e "${GREEN}Теперь запросы на порты ${CYAN}$new_ports${GREEN} не будут считаться сканированием.${NC}"
+    press_any_key
+}
