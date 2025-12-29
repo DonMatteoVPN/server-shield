@@ -171,3 +171,13 @@ get_external_ip() {
 get_hostname() {
     hostname -f 2>/dev/null || hostname
 }
+
+# Функция получения имени сервера (пользовательское или hostname)
+get_server_name() {
+    local custom_name=$(get_config "SERVER_NAME" "")
+    if [[ -n "$custom_name" ]]; then
+        echo "$custom_name"
+    else
+        get_hostname
+    fi
+}

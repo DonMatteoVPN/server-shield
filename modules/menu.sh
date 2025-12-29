@@ -18,6 +18,8 @@ source "$SCRIPT_DIR/rkhunter.sh"
 source "$SCRIPT_DIR/backup.sh"
 source "$SCRIPT_DIR/status.sh"
 source "$SCRIPT_DIR/updater.sh"
+source "$SCRIPT_DIR/traffic.sh" 2>/dev/null || true
+source "$SCRIPT_DIR/monitor.sh" 2>/dev/null || true
 
 # Получить локальную версию (fallback если updater.sh не загружен)
 _get_local_version() {
@@ -122,6 +124,18 @@ main_menu() {
         echo -e "  ${WHITE}7)${NC}  🔍  Rootkit сканирование"
         echo -e "  ${WHITE}8)${NC}  💾  Бэкап и восстановление"
         echo -e "  ${WHITE}9)${NC}  📝  Просмотр логов"
+        
+        # Мониторинг ресурсов
+        if type monitor_menu &>/dev/null; then
+            local monitor_status=$(get_monitor_status_line 2>/dev/null || echo "")
+            echo -e "  ${WHITE}m)${NC}  📈  Мониторинг ресурсов ${monitor_status}"
+        fi
+        
+        # Ограничение скорости (для нод)
+        if type traffic_menu &>/dev/null; then
+            local traffic_status=$(get_traffic_status_line 2>/dev/null || echo "")
+            echo -e "  ${WHITE}t)${NC}  🚦  Ограничение скорости ${traffic_status}"
+        fi
         echo ""
         echo -e "  ${WHITE}r)${NC}  🔄  ${YELLOW}Перенастроить защиту${NC}"
         
@@ -157,6 +171,22 @@ main_menu() {
             7) rkhunter_menu ;;
             8) backup_menu ;;
             9) logs_menu ;;
+            m|M)
+                if type monitor_menu &>/dev/null; then
+                    monitor_menu
+                else
+                    log_error "Модуль monitor.sh не загружен"
+                    press_any_key
+                fi
+                ;;
+            t|T) 
+                if type traffic_menu &>/dev/null; then
+                    traffic_menu
+                else
+                    log_error "Модуль traffic.sh не загружен"
+                    press_any_key
+                fi
+                ;;
             u|U) 
                 if type update_menu &>/dev/null; then
                     update_menu

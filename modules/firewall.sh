@@ -253,6 +253,62 @@ disable_ipv6_ufw() {
     fi
 }
 
+# Полное отключение IPv6 в системе
+disable_ipv6_system() {
+    log_step "Полное отключение IPv6 в системе..."
+    
+    local sysctl_conf="/etc/sysctl.d/99-disable-ipv6.conf"
+    
+    # Создаём конфиг для отключения IPv6
+    cat > "$sysctl_conf" << 'SYSCTL'
+# Disable IPv6 - Server Shield
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+SYSCTL
+
+    # Применяем настройки
+    sysctl -p "$sysctl_conf" > /dev/null 2>&1
+    
+    # Отключаем в UFW тоже
+    disable_ipv6_ufw
+    
+    # Проверяем
+    if [[ $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null) == "1" ]]; then
+        log_info "IPv6 полностью отключен в системе"
+    else
+        log_warn "IPv6 будет отключен после перезагрузки"
+    fi
+}
+
+# Включить IPv6 обратно
+enable_ipv6_system() {
+    log_step "Включение IPv6 в системе..."
+    
+    rm -f /etc/sysctl.d/99-disable-ipv6.conf
+    
+    # Включаем обратно
+    sysctl -w net.ipv6.conf.all.disable_ipv6=0 > /dev/null 2>&1
+    sysctl -w net.ipv6.conf.default.disable_ipv6=0 > /dev/null 2>&1
+    
+    # В UFW
+    local ufw_default="/etc/default/ufw"
+    if [[ -f "$ufw_default" ]]; then
+        sed -i 's/^IPV6=no/IPV6=yes/' "$ufw_default"
+    fi
+    
+    log_info "IPv6 включен (может потребоваться перезагрузка)"
+}
+
+# Проверить статус IPv6
+check_ipv6_status() {
+    if [[ $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null) == "1" ]]; then
+        echo "disabled"
+    else
+        echo "enabled"
+    fi
+}
+
 # Настройка фаервола для Панели
 setup_firewall_panel() {
     local admin_ip="$1"
@@ -516,7 +572,8 @@ firewall_menu() {
         print_header
         print_section "🔥 Управление Firewall (UFW)"
         
-        # Показываем краткий статус
+        echo ""
+        echo -e "${WHITE}Статус UFW:${NC}"
         echo ""
         local ufw_status=$(ufw status 2>/dev/null | head -1)
         if echo "$ufw_status" | grep -q "active"; then
@@ -527,6 +584,14 @@ firewall_menu() {
             echo -e "  ${RED}○${NC} UFW: Не активен ${RED}(нет защиты!)${NC}"
         else
             echo -e "  ${YELLOW}?${NC} UFW: Не установлен"
+        fi
+        
+        # Статус IPv6
+        local ipv6_status=$(check_ipv6_status)
+        if [[ "$ipv6_status" == "disabled" ]]; then
+            echo -e "  IPv6: ${GREEN}Отключен${NC}"
+        else
+            echo -e "  IPv6: ${YELLOW}Включен${NC}"
         fi
         
         echo ""
@@ -542,6 +607,19 @@ firewall_menu() {
         echo -e "  ${WHITE}7)${NC} 🔒 Закрыть порт"
         echo ""
         echo -e "  ${WHITE}8)${NC} ⚠️  Сбросить все правила"
+        echo ""
+        # Показываем опцию включения/выключения
+        if echo "$ufw_status" | grep -q "active"; then
+            echo -e "  ${WHITE}9)${NC} 🔴 Выключить UFW"
+        else
+            echo -e "  ${WHITE}9)${NC} 🟢 Включить UFW"
+        fi
+        # IPv6 toggle
+        if [[ "$ipv6_status" == "disabled" ]]; then
+            echo -e "  ${WHITE}i)${NC} 🌐 Включить IPv6"
+        else
+            echo -e "  ${WHITE}i)${NC} 🚫 Отключить IPv6 ${YELLOW}(рекомендуется)${NC}"
+        fi
         echo -e "  ${WHITE}0)${NC} Назад"
         echo ""
         read -p "Выберите действие: " choice
@@ -609,6 +687,47 @@ firewall_menu() {
                 if confirm "Вы уверены?" "n"; then
                     ufw --force reset
                     log_info "Фаервол сброшен"
+                fi
+                ;;
+            9)
+                # Включить/выключить UFW
+                if ufw status 2>/dev/null | grep -q "Status: active"; then
+                    echo ""
+                    echo -e "${YELLOW}⚠️  Отключение UFW уберёт ВСЮ защиту фаервола!${NC}"
+                    if confirm "Выключить UFW?" "n"; then
+                        ufw disable
+                        log_warn "UFW выключен — сервер без защиты фаервола!"
+                    fi
+                else
+                    echo ""
+                    log_step "Включение UFW..."
+                    echo "y" | ufw enable > /dev/null 2>&1
+                    if ufw status 2>/dev/null | grep -q "Status: active"; then
+                        log_info "UFW включен"
+                    else
+                        log_error "Не удалось включить UFW"
+                    fi
+                fi
+                ;;
+            i|I)
+                # Включить/выключить IPv6
+                local ipv6_status=$(check_ipv6_status)
+                if [[ "$ipv6_status" == "disabled" ]]; then
+                    echo ""
+                    if confirm "Включить IPv6?" "n"; then
+                        enable_ipv6_system
+                    fi
+                else
+                    echo ""
+                    echo -e "${WHITE}Отключение IPv6 рекомендуется для безопасности.${NC}"
+                    echo -e "${YELLOW}Это закроет доступ по IPv6 ко всем портам.${NC}"
+                    if confirm "Отключить IPv6?" "y"; then
+                        disable_ipv6_system
+                        # Перезагружаем UFW для применения
+                        if ufw status 2>/dev/null | grep -q "Status: active"; then
+                            ufw reload 2>/dev/null
+                        fi
+                    fi
                 fi
                 ;;
             0) return ;;

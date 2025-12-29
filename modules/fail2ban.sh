@@ -227,6 +227,7 @@ SCRIPT
 setup_summary_script() {
     local tg_token="$1"
     local tg_chat_id="$2"
+    local tg_thread_id="$3"
     
     mkdir -p /opt/server-shield/scripts
     mkdir -p /opt/server-shield/logs
@@ -234,10 +235,18 @@ setup_summary_script() {
     cat > "$FAIL2BAN_SUMMARY_SCRIPT" << 'SCRIPT'
 #!/bin/bash
 # Fail2Ban Summary Report - All Jails
+# С поддержкой групп и тем
 
 TOKEN="__TOKEN__"
 CHAT_ID="__CHAT_ID__"
-HOSTNAME=$(hostname)
+THREAD_ID="__THREAD_ID__"
+
+# Получаем имя сервера (пользовательское или hostname)
+SERVER_NAME=$(grep "^SERVER_NAME=" /opt/server-shield/config/shield.conf 2>/dev/null | cut -d'=' -f2)
+if [[ -z "$SERVER_NAME" ]]; then
+    SERVER_NAME=$(hostname)
+fi
+
 SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || echo "N/A")
 DATE=$(date '+%Y-%m-%d %H:%M:%S')
 
@@ -293,7 +302,7 @@ fi
 # Формируем сообщение
 MESSAGE="📊 Fail2Ban Сводка
 
-Сервер: $HOSTNAME
+Сервер: $SERVER_NAME
 IP: $SERVER_IP
 Время: $DATE
 
@@ -312,14 +321,22 @@ if [[ -n "$NEW_BANS" ]]; then
 $NEW_BANS"
 fi
 
-curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
-    -d "chat_id=$CHAT_ID" \
-    -d "text=$MESSAGE" > /dev/null 2>&1
+# Формируем параметры для curl
+PARAMS="-d chat_id=$CHAT_ID"
+PARAMS="$PARAMS --data-urlencode text=$MESSAGE"
+
+# Добавляем thread_id если указан
+if [[ -n "$THREAD_ID" ]] && [[ "$THREAD_ID" != "0" ]]; then
+    PARAMS="$PARAMS -d message_thread_id=$THREAD_ID"
+fi
+
+curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" $PARAMS > /dev/null 2>&1
 SCRIPT
 
-    # Подставляем токен и chat_id
+    # Подставляем токен, chat_id и thread_id
     sed -i "s|__TOKEN__|$tg_token|g" "$FAIL2BAN_SUMMARY_SCRIPT"
     sed -i "s|__CHAT_ID__|$tg_chat_id|g" "$FAIL2BAN_SUMMARY_SCRIPT"
+    sed -i "s|__THREAD_ID__|$tg_thread_id|g" "$FAIL2BAN_SUMMARY_SCRIPT"
     
     chmod +x "$FAIL2BAN_SUMMARY_SCRIPT"
 }
@@ -393,6 +410,7 @@ reinit_telegram_action() {
     
     local tg_token=$(get_config "TG_TOKEN" "")
     local tg_chat_id=$(get_config "TG_CHAT_ID" "")
+    local tg_thread_id=$(get_config "TG_THREAD_ID" "")
     
     if [[ -z "$tg_token" ]] || [[ -z "$tg_chat_id" ]]; then
         log_error "Telegram не настроен!"
@@ -400,11 +418,11 @@ reinit_telegram_action() {
         return 1
     fi
     
-    # Пересоздаём action и скрипты
-    create_telegram_action "$tg_token" "$tg_chat_id"
+    # Пересоздаём action и скрипты с поддержкой thread_id
+    create_telegram_action "$tg_token" "$tg_chat_id" "$tg_thread_id"
     
     # Пересоздаём скрипт сводки
-    setup_summary_script "$tg_token" "$tg_chat_id"
+    setup_summary_script "$tg_token" "$tg_chat_id" "$tg_thread_id"
     
     # Устанавливаем режим instant по умолчанию если не установлен
     local current_mode=$(get_notify_mode)
@@ -418,6 +436,9 @@ reinit_telegram_action() {
     log_info "Telegram уведомления переинициализированы!"
     echo -e "   Token: ${CYAN}${tg_token:0:10}...${NC}"
     echo -e "   Chat ID: ${CYAN}$tg_chat_id${NC}"
+    if [[ -n "$tg_thread_id" ]] && [[ "$tg_thread_id" != "0" ]]; then
+        echo -e "   Thread ID: ${CYAN}$tg_thread_id${NC} (тема в группе)"
+    fi
     echo -e "   Режим: ${CYAN}$(get_notify_mode)${NC}"
 }
 
@@ -911,9 +932,13 @@ update_ignoreip() {
 
 # Создать фильтр для portscan
 create_portscan_filter() {
-    cat > /etc/fail2ban/filter.d/portscan.conf << 'FILTER'
+    # Получаем список игнорируемых портов из конфига (для VPN клиентов)
+    local ignore_ports=$(get_config "PORTSCAN_IGNORE_PORTS" "443,8443")
+    
+    cat > /etc/fail2ban/filter.d/portscan.conf << FILTER
 # Fail2Ban filter for port scanning detection
 # Поддерживает syslog формат и kern.log/ufw.log
+# Игнорирует VPN порты: $ignore_ports
 
 [Definition]
 # Формат syslog: timestamp hostname kernel: [UFW BLOCK] ... SRC=IP
@@ -922,7 +947,10 @@ failregex = ^\s*\S+\s+\S+\s+\S+\s+kernel:\s+\[UFW BLOCK\].*SRC=<HOST>
             ^.*\[UFW BLOCK\].*SRC=<HOST>
             UFW BLOCK.*SRC=<HOST>
 
-ignoreregex =
+# Игнорируем запросы на VPN порты (443, 8443 и т.д.) - это клиенты проверяют доступность
+ignoreregex = DPT=(443|8443|80)\\s
+              DPT=443\\s
+              DPT=8443\\s
 FILTER
 }
 
@@ -1053,6 +1081,7 @@ JAILS
 create_telegram_action() {
     local tg_token="${1:-$(get_config "TG_TOKEN" "")}"
     local tg_chat_id="${2:-$(get_config "TG_CHAT_ID" "")}"
+    local tg_thread_id="${3:-$(get_config "TG_THREAD_ID" "")}"
     
     # Если Telegram не настроен - пропускаем
     if [[ -z "$tg_token" ]] || [[ -z "$tg_chat_id" ]]; then
@@ -1073,16 +1102,18 @@ actionunban =
 name = default
 ACTION
 
-    # Создаём скрипт уведомлений
+    # Создаём скрипт уведомлений с поддержкой thread_id
     mkdir -p /opt/server-shield/scripts
     mkdir -p /opt/server-shield/logs
     
     cat > /opt/server-shield/scripts/fail2ban-notify-all.sh << SCRIPT
 #!/bin/bash
 # Fail2Ban Telegram Notify - All Jails
+# С поддержкой групп и тем (topics)
 
 TOKEN="$tg_token"
 CHAT_ID="$tg_chat_id"
+THREAD_ID="$tg_thread_id"
 
 # Логируем вызов для отладки
 echo "\$(date '+%Y-%m-%d %H:%M:%S') | Called with: \$1 \$2 \$3" >> /opt/server-shield/logs/fail2ban-debug.log
@@ -1105,7 +1136,13 @@ fi
 JAIL="\$1"
 IP="\$2"
 ACTION="\$3"
-HOSTNAME=\$(hostname)
+
+# Получаем имя сервера (пользовательское или hostname)
+SERVER_NAME=\$(grep "^SERVER_NAME=" /opt/server-shield/config/shield.conf 2>/dev/null | cut -d'=' -f2)
+if [[ -z "\$SERVER_NAME" ]]; then
+    SERVER_NAME=\$(hostname)
+fi
+
 DATE=\$(date '+%Y-%m-%d %H:%M:%S')
 
 # Определяем эмодзи и описание по типу jail
@@ -1138,14 +1175,21 @@ esac
 
 MESSAGE="\$EMOJI Fail2Ban: Бан
 
-Сервер: \$HOSTNAME
+Сервер: \$SERVER_NAME
 Причина: \$DESC
 IP: \$IP
 Время: \$DATE"
 
-curl -s -X POST "https://api.telegram.org/bot\$TOKEN/sendMessage" \\
-    -d "chat_id=\$CHAT_ID" \\
-    -d "text=\$MESSAGE" > /dev/null 2>&1
+# Формируем параметры для curl
+PARAMS="-d chat_id=\$CHAT_ID"
+PARAMS="\$PARAMS --data-urlencode text=\$MESSAGE"
+
+# Добавляем thread_id если указан (для тем в группах)
+if [[ -n "\$THREAD_ID" ]] && [[ "\$THREAD_ID" != "0" ]]; then
+    PARAMS="\$PARAMS -d message_thread_id=\$THREAD_ID"
+fi
+
+curl -s -X POST "https://api.telegram.org/bot\$TOKEN/sendMessage" \$PARAMS > /dev/null 2>&1
 SCRIPT
 
     chmod +x /opt/server-shield/scripts/fail2ban-notify-all.sh
@@ -1348,6 +1392,11 @@ extended_protection_menu() {
             echo -e "    ${RED}○${NC} MySQL брутфорс — ${RED}Выключен${NC}"
         fi
         
+        # Показываем игнорируемые порты для portscan
+        local ignore_ports=$(get_config "PORTSCAN_IGNORE_PORTS" "443,8443")
+        echo ""
+        echo -e "  ${WHITE}Игнор портов (VPN/HAPP):${NC} ${CYAN}$ignore_ports${NC}"
+        
         echo ""
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
@@ -1359,6 +1408,7 @@ extended_protection_menu() {
         echo -e "  ${WHITE}5)${NC} ✅ Включить всё"
         echo -e "  ${WHITE}6)${NC} ❌ Выключить всё"
         echo ""
+        echo -e "  ${WHITE}p)${NC} ⚙️  Настроить игнорируемые порты (для VPN/HAPP)"
         echo -e "  ${WHITE}w)${NC} 📋 Whitelist (доверенные IP)"
         echo -e "  ${WHITE}0)${NC} Назад"
         echo ""
@@ -1369,6 +1419,8 @@ extended_protection_menu() {
                 if [[ "$(get_jail_status 'portscan')" == "enabled" ]]; then
                     toggle_jail "portscan" "disable"
                 else
+                    # При включении пересоздаём фильтр с актуальными игнор-портами
+                    create_portscan_filter
                     toggle_jail "portscan" "enable"
                 fi
                 sleep 1
@@ -1398,6 +1450,7 @@ extended_protection_menu() {
                 sleep 1
                 ;;
             5)
+                create_portscan_filter  # Обновляем фильтр с игнор-портами
                 toggle_jail "portscan" "enable"
                 toggle_jail "nginx-http-auth-shield" "enable"
                 toggle_jail "nginx-badbots-shield" "enable"
@@ -1411,6 +1464,7 @@ extended_protection_menu() {
                 toggle_jail "mysqld-auth-shield" "disable"
                 sleep 1
                 ;;
+            p|P) configure_portscan_ignore_ports ;;
             w|W) whitelist_menu ;;
             0) return ;;
             *) 
@@ -1420,3 +1474,47 @@ extended_protection_menu() {
         esac
     done
 }
+
+# Настройка игнорируемых портов для portscan (для VPN клиентов типа HAPP)
+configure_portscan_ignore_ports() {
+    print_section "⚙️ Настройка игнорируемых портов"
+    
+    local current_ports=$(get_config "PORTSCAN_IGNORE_PORTS" "443,8443")
+    
+    echo ""
+    echo -e "${WHITE}Эти порты будут исключены из детекта сканирования.${NC}"
+    echo -e "${WHITE}Используйте для VPN портов, чтобы клиенты (HAPP и др.)${NC}"
+    echo -e "${WHITE}не банились при проверке доступности.${NC}"
+    echo ""
+    echo -e "Текущие порты: ${CYAN}$current_ports${NC}"
+    echo ""
+    echo -e "${YELLOW}Примеры:${NC}"
+    echo -e "  443,8443        — HTTPS и альтернативный"
+    echo -e "  443,8443,2053   — плюс Cloudflare порт"
+    echo -e "  443             — только HTTPS"
+    echo ""
+    
+    read -p "Порты через запятую [$current_ports]: " new_ports
+    new_ports=${new_ports:-$current_ports}
+    
+    # Валидация
+    if [[ ! "$new_ports" =~ ^[0-9,]+$ ]]; then
+        log_error "Неверный формат. Используйте только цифры и запятые."
+        return 1
+    fi
+    
+    # Сохраняем
+    save_config "PORTSCAN_IGNORE_PORTS" "$new_ports"
+    
+    # Пересоздаём фильтр
+    create_portscan_filter
+    
+    # Перезагружаем Fail2Ban если portscan включен
+    if [[ "$(get_jail_status 'portscan')" == "enabled" ]]; then
+        systemctl reload fail2ban 2>/dev/null
+        log_info "Fail2Ban перезагружен с новыми настройками"
+    fi
+    
+    log_info "Порты обновлены: $new_ports"
+    echo ""
+    echo -e "${GREEN}Теперь запросы на порты ${CYAN}$new_ports${GREEN} не будут считаться сканированием.${NC}"

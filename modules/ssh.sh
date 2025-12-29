@@ -12,6 +12,12 @@ SSH_CONFIG="/etc/ssh/sshd_config"
 restart_ssh_service() {
     local target_port="${1:-}"
     
+    # 0. Создаём директорию /run/sshd если не существует (критично!)
+    if [[ ! -d /run/sshd ]]; then
+        mkdir -p /run/sshd
+        chmod 755 /run/sshd
+    fi
+    
     # 1. Проверяем конфиг на ошибки
     if ! sshd -t 2>/dev/null; then
         log_error "Ошибка в конфиге SSH!"
@@ -94,9 +100,16 @@ harden_ssh() {
     # Бэкап
     backup_ssh_config
     
+    # Создаём директорию /run/sshd если не существует (критично для некоторых систем)
+    if [[ ! -d /run/sshd ]]; then
+        mkdir -p /run/sshd
+        chmod 755 /run/sshd
+    fi
+    
     # Основные настройки безопасности
     declare -A ssh_settings=(
         ["Port"]="$new_port"
+        ["AddressFamily"]="inet"
         ["PermitRootLogin"]="prohibit-password"
         ["PasswordAuthentication"]="no"
         ["PubkeyAuthentication"]="yes"
@@ -282,6 +295,23 @@ change_ssh_port() {
         echo "Port $new_port" >> "$SSH_CONFIG"
     fi
     
+    # 2.0.1 Отключаем IPv6 для SSH (чтобы не было доступа через IPv6 на старый порт)
+    if grep -q "^AddressFamily" "$SSH_CONFIG"; then
+        sed -i "s/^AddressFamily.*/AddressFamily inet/" "$SSH_CONFIG"
+    elif grep -q "^#AddressFamily" "$SSH_CONFIG"; then
+        sed -i "s/^#AddressFamily.*/AddressFamily inet/" "$SSH_CONFIG"
+    else
+        echo "AddressFamily inet" >> "$SSH_CONFIG"
+    fi
+    log_info "IPv6 для SSH отключен (AddressFamily inet)"
+    
+    # 2.0.2 Создаём директорию /run/sshd если не существует
+    if [[ ! -d /run/sshd ]]; then
+        mkdir -p /run/sshd
+        chmod 755 /run/sshd
+        log_info "Создана директория /run/sshd"
+    fi
+    
     # 2.1 Проверяем и настраиваем ssh.socket (Ubuntu 22.04+)
     if systemctl is-active --quiet ssh.socket 2>/dev/null; then
         log_step "Обнаружен ssh.socket, настраиваем..."
@@ -335,6 +365,51 @@ EOF
     
     if [[ "$ssh_started" == false ]]; then
         log_error "SSH не запустился на порту $new_port!"
+        
+        # ДИАГНОСТИКА: Выводим причину
+        echo ""
+        echo -e "${YELLOW}─── Диагностика ───${NC}"
+        
+        # Проверяем конфиг SSH
+        echo -n "Проверка конфига SSH: "
+        if sshd -t 2>&1; then
+            echo -e "${GREEN}OK${NC}"
+        else
+            echo -e "${RED}ОШИБКА${NC}"
+            sshd -t 2>&1 | head -5
+        fi
+        
+        # Проверяем SELinux
+        if command -v sestatus &> /dev/null; then
+            selinux_status=$(sestatus 2>/dev/null | grep "SELinux status" | awk '{print $3}')
+            if [[ "$selinux_status" == "enabled" ]]; then
+                echo -e "SELinux: ${YELLOW}ВКЛЮЧЁН - может блокировать порт $new_port${NC}"
+                echo "  Решение: semanage port -a -t ssh_port_t -p tcp $new_port"
+            fi
+        fi
+        
+        # Проверяем занят ли порт
+        if ss -tlnp | grep -q ":$new_port"; then
+            echo -e "Порт $new_port: ${YELLOW}ЗАНЯТ другим сервисом${NC}"
+            ss -tlnp | grep ":$new_port"
+        else
+            echo -e "Порт $new_port: ${GREEN}свободен${NC}"
+        fi
+        
+        # Проверяем ssh.socket
+        if systemctl is-enabled --quiet ssh.socket 2>/dev/null; then
+            echo -e "ssh.socket: ${YELLOW}АКТИВЕН - требуется отдельная настройка${NC}"
+            echo "  Override файл: /etc/systemd/system/ssh.socket.d/override.conf"
+            [[ -f /etc/systemd/system/ssh.socket.d/override.conf ]] && cat /etc/systemd/system/ssh.socket.d/override.conf
+        fi
+        
+        # Проверяем статус сервиса
+        echo "Статус SSH сервиса:"
+        systemctl status ssh.service 2>/dev/null | head -10 || systemctl status sshd.service 2>/dev/null | head -10
+        
+        echo -e "${YELLOW}───────────────────${NC}"
+        echo ""
+        
         log_warn "Откат изменений..."
         
         # Откат конфига
